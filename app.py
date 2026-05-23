@@ -8,7 +8,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.figure_factory as ff
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -25,9 +24,6 @@ st.markdown("""
     .stTabs [data-baseweb="tab-list"] button [data-testid="stMarkdownContainer"] p {
         font-size: 1.1rem;
         font-weight: 600;
-    }
-    .reportview-container .markdown-text-container {
-        font-family: 'Inter', sans-serif;
     }
     .metric-card {
         background-color: #1e222d;
@@ -108,6 +104,8 @@ def add_technical_indicators(df, ema_windows=[7,30,50,200], bb_period=20, bb_std
 
 def compute_risk_metrics(returns, rf_rate=0.0457, annualization_factor=252):
     """Compute daily and annualized metrics."""
+    if len(returns) == 0:
+        return np.nan, np.nan, np.nan, np.nan, np.nan
     daily_ret = returns.mean()
     daily_vol = returns.std()
     annual_ret = (1 + daily_ret) ** annualization_factor - 1
@@ -117,12 +115,19 @@ def compute_risk_metrics(returns, rf_rate=0.0457, annualization_factor=252):
 
 def calculate_beta(asset_returns, market_returns):
     """Calculate beta against market."""
+    if len(asset_returns) < 2 or len(market_returns) < 2:
+        return np.nan
+    # Ensure 1D arrays
+    asset_returns = np.asarray(asset_returns).flatten()
+    market_returns = np.asarray(market_returns).flatten()
     covariance = np.cov(asset_returns, market_returns)[0][1]
     variance = np.var(market_returns)
     return covariance / variance if variance != 0 else np.nan
 
 def calculate_var(returns, capital=10000, confidence=0.95, horizon=1):
     """Value at Risk (historical method)."""
+    if len(returns) == 0:
+        return np.nan, np.nan
     var_percent = np.percentile(returns, (1-confidence)*100)
     var_absolute = capital * var_percent * np.sqrt(horizon)
     return var_percent, var_absolute
@@ -133,6 +138,8 @@ def forecast_price(series, days=63):
     df['days'] = (df['Date'] - df['Date'].min()).dt.days
     X = df[['days']].values
     y = df[series.name].values
+    if len(X) < 2:
+        return pd.Series(dtype=float), None
     model = LinearRegression()
     model.fit(X, y)
     future_days = np.arange(df['days'].max()+1, df['days'].max()+days+1).reshape(-1,1)
@@ -143,21 +150,21 @@ def forecast_price(series, days=63):
 
 def generate_recommendation(price_series, indicators, fundamentals, forecast_signal):
     """Rule-based + ML forecast recommendation."""
+    if indicators.empty:
+        return "HOLD", "recommend-hold", 0
     latest = indicators.iloc[-1]
     # Trend signals
-    ema_7 = latest['EMA_7']
-    ema_30 = latest['EMA_30']
-    ema_200 = latest['EMA_200']
+    ema_7 = latest.get('EMA_7', latest.get('Close', 0))
+    ema_30 = latest.get('EMA_30', ema_7)
+    ema_200 = latest.get('EMA_200', ema_30)
     close = latest['Close']
     # RSI
-    rsi = latest['RSI'] if 'RSI' in latest else 50
+    rsi = latest.get('RSI', 50)
     # MACD
-    macd = latest['MACD']
-    signal = latest['Signal']
-    # Forecast direction (last forecast vs current)
-    forecast_dir = forecast_signal  # 1=up, -1=down, 0=neutral
-    # Fundamentals: P/E, etc. (simplified)
-    pe = fundamentals.get('trailingPE', 20)
+    macd = latest.get('MACD', 0)
+    signal = latest.get('Signal', 0)
+    # Fundamentals (simplified)
+    pe = fundamentals.get('P/E', 20) if fundamentals else 20
     # Score
     score = 0
     if close > ema_7 > ema_30 > ema_200:
@@ -174,9 +181,9 @@ def generate_recommendation(price_series, indicators, fundamentals, forecast_sig
         score += 1
     elif macd < signal:
         score -= 1
-    if forecast_dir == 1:
+    if forecast_signal == 1:
         score += 1
-    elif forecast_dir == -1:
+    elif forecast_signal == -1:
         score -= 1
     if pe < 15:
         score += 1
@@ -208,7 +215,6 @@ def fetch_fundamentals(ticker):
         'Revenue': info.get('totalRevenue'),
         'Gross Profit': info.get('grossProfits'),
     }
-    # Additional DCF, Balance Sheet items can be added
     return fundamentals
 
 def fetch_recent_news(ticker):
@@ -301,7 +307,7 @@ for ticker in valid_tickers:
         bench_returns = benchmark_data.pct_change().dropna()
         common_idx = returns.index.intersection(bench_returns.index)
         if len(common_idx) > 1:
-            beta = calculate_beta(returns.loc[common_idx], bench_returns.loc[common_idx])
+            beta = calculate_beta(returns.loc[common_idx].values, bench_returns.loc[common_idx].values)
             all_betas[ticker] = beta
         else:
             all_betas[ticker] = np.nan
@@ -322,16 +328,19 @@ for ticker in valid_tickers:
     except:
         fundamental_dict[ticker] = {}
     
-    # Forecast (using adjusted close)
+    # Forecast
     forecast_series, model = forecast_price(prices.dropna(), days=forecast_days)
     forecast_series_dict[ticker] = forecast_series
     # Forecast direction
-    last_price = prices.iloc[-1]
-    forecast_end = forecast_series.iloc[-1] if not forecast_series.empty else last_price
-    forecast_signal = 1 if forecast_end > last_price * 1.02 else (-1 if forecast_end < last_price * 0.98 else 0)
+    if not forecast_series.empty and len(prices) > 0:
+        last_price = prices.iloc[-1]
+        forecast_end = forecast_series.iloc[-1]
+        forecast_signal = 1 if forecast_end > last_price * 1.02 else (-1 if forecast_end < last_price * 0.98 else 0)
+    else:
+        forecast_signal = 0
     
     # Recommendation
-    rec, rec_color, score = generate_recommendation(tech_df, tech_df, fundamental_dict[ticker], forecast_signal)
+    rec, rec_color, score = generate_recommendation(prices, tech_df, fundamental_dict[ticker], forecast_signal)
     recommendations[ticker] = {'rec': rec, 'color': rec_color, 'score': score, 'forecast_signal': forecast_signal}
 
 # Create tabs
@@ -344,11 +353,11 @@ with tab1:
     st.subheader("Asset Summary")
     summary_df = pd.DataFrame({
         'Ticker': valid_tickers,
-        'Annualized Return (%)': [all_returns[t].mean() * 252 * 100 for t in valid_tickers],
-        'Annualized Volatility (%)': [all_volatility[t]*100 for t in valid_tickers],
+        'Annualized Return (%)': [all_returns[t].mean() * 252 * 100 if not all_returns[t].empty else np.nan for t in valid_tickers],
+        'Annualized Volatility (%)': [all_volatility[t]*100 if not np.isnan(all_volatility[t]) else np.nan for t in valid_tickers],
         'Sharpe Ratio': [all_sharpe[t] for t in valid_tickers],
         'Beta': [all_betas.get(t, np.nan) for t in valid_tickers],
-        'VaR (95%, 1d %)': [all_var[t]['percent']*100 for t in valid_tickers],
+        'VaR (95%, 1d %)': [all_var[t]['percent']*100 if not np.isnan(all_var[t]['percent']) else np.nan for t in valid_tickers],
         'Recommendation': [recommendations[t]['rec'] for t in valid_tickers]
     })
     st.dataframe(summary_df.style.format({
@@ -368,7 +377,7 @@ with tab1:
             df_ohlc = data_dict[ticker][['Open','High','Low','Close']].copy()
             ha = heikin_ashi(df_ohlc)
             tech = technical_dict[ticker].copy()
-            # Plot using Plotly for better interactivity
+            # Plot using Plotly
             fig = go.Figure()
             # Heikin Ashi candlesticks
             fig.add_trace(go.Candlestick(
@@ -392,14 +401,16 @@ with tab1:
             # Forecast chart
             prices = all_prices[ticker].dropna()
             forecast = forecast_series_dict[ticker]
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(x=prices.index, y=prices, mode='lines', name='Historical Price'))
-            fig2.add_trace(go.Scatter(x=forecast.index, y=forecast, mode='lines', name=f'{forecast_days}-day Forecast', line=dict(dash='dot', color='cyan')))
-            fig2.update_layout(title=f'{ticker} – Price Forecast (Linear Regression)', xaxis_title='Date', yaxis_title='Price', template='plotly_dark')
-            st.plotly_chart(fig2, use_container_width=True)
+            if not forecast.empty:
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(x=prices.index, y=prices, mode='lines', name='Historical Price'))
+                fig2.add_trace(go.Scatter(x=forecast.index, y=forecast, mode='lines', name=f'{forecast_days}-day Forecast', line=dict(dash='dot', color='cyan')))
+                fig2.update_layout(title=f'{ticker} – Price Forecast (Linear Regression)', xaxis_title='Date', yaxis_title='Price', template='plotly_dark')
+                st.plotly_chart(fig2, use_container_width=True)
+            else:
+                st.info("Not enough data for forecast.")
         
         with col2:
-            # Recommendation card
             rec = recommendations[ticker]['rec']
             color = recommendations[ticker]['color']
             st.markdown(f"<div class='metric-card'><h4>Recommendation</h4><p class='{color}' style='font-size:24px'>{rec}</p>", unsafe_allow_html=True)
@@ -418,7 +429,7 @@ with tab1:
             for n in news[:3]:
                 st.write(f"- {n[:80]}...")
             
-            # Insights & Risks (simple rule-based)
+            # Insights & Risks
             st.markdown("**Insights & Risks**")
             if rec == "BUY":
                 st.success("✅ Undervalued relative to peers; positive technical momentum.")
@@ -426,7 +437,6 @@ with tab1:
                 st.error("⚠️ Overbought signals; weakening fundamentals.")
             else:
                 st.info("⏸️ Neutral zone – watch for breakout or macro catalysts.")
-            # Macro factors (placeholder)
             st.markdown("**Macro Considerations**")
             st.write("• Interest rate expectations\n• Sector rotation trends\n• Global liquidity conditions")
     
@@ -449,12 +459,16 @@ with tab2:
         bench_cum = (1 + bench_ret).cumprod() - 1
         bench_cum.name = benchmark
         comp_df = pd.concat([cum_returns, bench_cum], axis=1).dropna()
-        fig_bench = px.line(comp_df, x=comp_df.index, y=comp_df.columns, title=f"Cumulative Returns vs {benchmark}", template='plotly_dark')
-        st.plotly_chart(fig_bench, use_container_width=True)
+        if not comp_df.empty:
+            fig_bench = px.line(comp_df, x=comp_df.index, y=comp_df.columns, title=f"Cumulative Returns vs {benchmark}", template='plotly_dark')
+            st.plotly_chart(fig_bench, use_container_width=True)
+        else:
+            st.warning("Insufficient overlapping data for benchmark comparison.")
         
         # Relative performance table
-        total_ret = comp_df.iloc[-1] * 100
-        st.dataframe(pd.DataFrame(total_ret.sort_values(ascending=False), columns=['Total Return (%)']).style.format('{:.2f}'))
+        if not comp_df.empty:
+            total_ret = comp_df.iloc[-1] * 100
+            st.dataframe(pd.DataFrame(total_ret.sort_values(ascending=False), columns=['Total Return (%)']).style.format('{:.2f}'))
     else:
         st.warning("Benchmark data not available.")
 
@@ -462,7 +476,7 @@ with tab2:
 # Tab 3: Correlation Heatmap
 # -------------------------------
 with tab3:
-    if len(valid_tickers) > 1:
+    if len(valid_tickers) > 1 and not all_returns.empty:
         corr_matrix = all_returns.corr()
         fig_corr = ff.create_annotated_heatmap(z=corr_matrix.values, x=list(corr_matrix.columns), y=list(corr_matrix.index), colorscale='RdBu', showscale=True)
         fig_corr.update_layout(title="Correlation Matrix of Daily Returns", template='plotly_dark', height=600)
@@ -474,7 +488,7 @@ with tab3:
 # Tab 4: Covariance Heatmap (annualized)
 # -------------------------------
 with tab4:
-    if len(valid_tickers) > 1:
+    if len(valid_tickers) > 1 and not all_returns.empty:
         annual_cov = all_returns.cov() * 252
         fig_cov = ff.create_annotated_heatmap(z=annual_cov.values, x=list(annual_cov.columns), y=list(annual_cov.index), colorscale='Viridis', showscale=True)
         fig_cov.update_layout(title="Annualized Covariance Matrix", template='plotly_dark', height=600)
@@ -490,21 +504,21 @@ with tab5:
     # Build a comprehensive DataFrame
     risk_df = pd.DataFrame({
         'Ticker': valid_tickers,
-        'Annualized Return (%)': [all_returns[t].mean() * 252 * 100 for t in valid_tickers],
-        'Annualized Volatility (%)': [all_volatility[t]*100 for t in valid_tickers],
+        'Annualized Return (%)': [all_returns[t].mean() * 252 * 100 if not all_returns[t].empty else np.nan for t in valid_tickers],
+        'Annualized Volatility (%)': [all_volatility[t]*100 if not np.isnan(all_volatility[t]) else np.nan for t in valid_tickers],
         'Sharpe Ratio': [all_sharpe[t] for t in valid_tickers],
         'Beta (vs benchmark)': [all_betas.get(t, np.nan) for t in valid_tickers],
-        'VaR (95%, 1d %)': [all_var[t]['percent']*100 for t in valid_tickers],
-        'VaR (Absolute, 1d)': [all_var[t]['absolute'] for t in valid_tickers],
+        'VaR (95%, 1d %)': [all_var[t]['percent']*100 if not np.isnan(all_var[t]['percent']) else np.nan for t in valid_tickers],
+        'VaR (Absolute, 1d)': [all_var[t]['absolute'] if not np.isnan(all_var[t]['absolute']) else np.nan for t in valid_tickers],
         'Recommendation': [recommendations[t]['rec'] for t in valid_tickers],
     })
     # Add forecast end price
     forecast_end_vals = [forecast_series_dict[t].iloc[-1] if not forecast_series_dict[t].empty else np.nan for t in valid_tickers]
-    risk_df['Forecast Price ({}d)'.format(forecast_days)] = forecast_end_vals
+    risk_df[f'Forecast Price ({forecast_days}d)'] = forecast_end_vals
     
     # Technical indicators last values
     for t in valid_tickers:
-        tech_last = technical_dict[t].iloc[-1]
+        tech_last = technical_dict[t].iloc[-1] if not technical_dict[t].empty else pd.Series()
         for col in ['RSI', 'MACD', 'Signal']:
             if col in tech_last:
                 risk_df.loc[risk_df['Ticker']==t, col] = tech_last[col]
@@ -524,8 +538,9 @@ with tab5:
     # Add historical data for each ticker
     for t in valid_tickers:
         hist = data_dict[t][['Open','High','Low','Close','Volume']].copy()
-        hist['Returns'] = all_returns[t]
-        hist.to_excel(output, sheet_name=f'{t}_Historical')
+        if not hist.empty:
+            hist['Returns'] = all_returns[t]
+            hist.to_excel(output, sheet_name=f'{t}_Historical')
     
     output.close()
     
