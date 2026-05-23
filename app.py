@@ -216,11 +216,22 @@ def fetch_fundamentals(ticker):
     return fundamentals
 
 def fetch_recent_news(ticker):
-    """Fetch news headlines from yfinance."""
+    """Fetch news headlines from yfinance safely."""
     stock = yf.Ticker(ticker)
-    news = stock.news[:5] if hasattr(stock, 'news') else []
-    headlines = [item['title'] for item in news] if news else ["No recent news available."]
-    return headlines
+    try:
+        news = stock.news
+        if news and isinstance(news, list):
+            headlines = []
+            for item in news[:5]:
+                if isinstance(item, dict) and 'title' in item:
+                    headlines.append(item['title'])
+                else:
+                    headlines.append("News story available")
+            return headlines if headlines else ["No recent news available."]
+        else:
+            return ["No recent news available."]
+    except Exception:
+        return ["Unable to fetch news at this time."]
 
 # -------------------------------
 # Sidebar Configuration
