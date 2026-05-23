@@ -14,7 +14,7 @@ warnings.filterwarnings('ignore')
 # Page config
 st.set_page_config(page_title="Financial Analysis Dashboard", layout="wide", page_icon="📈")
 
-# Custom CSS for stock market style (without "Wall Street" text)
+# Custom CSS for finance dashboard style
 st.markdown("""
     <style>
     .main {
@@ -87,7 +87,7 @@ def add_technical_indicators(df, ema_windows=[7,30,50,200], bb_period=20, bb_std
     df['BB_mid'] = df['Close'].rolling(window=bb_period).mean()
     df['BB_upper'] = df['BB_mid'] + bb_std * df['Close'].rolling(window=bb_period).std()
     df['BB_lower'] = df['BB_mid'] - bb_std * df['Close'].rolling(window=bb_period).std()
-    # RSI
+    # RSI (14-day)
     delta = df['Close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -117,7 +117,6 @@ def calculate_beta(asset_returns, market_returns):
     """Calculate beta against market."""
     if len(asset_returns) < 2 or len(market_returns) < 2:
         return np.nan
-    # Ensure 1D arrays
     asset_returns = np.asarray(asset_returns).flatten()
     market_returns = np.asarray(market_returns).flatten()
     covariance = np.cov(asset_returns, market_returns)[0][1]
@@ -134,12 +133,14 @@ def calculate_var(returns, capital=10000, confidence=0.95, horizon=1):
 
 def forecast_price(series, days=63):
     """Forecast next 'days' using linear regression on time index."""
+    if len(series) < 2:
+        return pd.Series(dtype=float), None
+    # Reset index and rename the date column to 'Date'
     df = series.dropna().reset_index()
+    df.columns = ['Date', 'Price']  # ensure column names
     df['days'] = (df['Date'] - df['Date'].min()).dt.days
     X = df[['days']].values
-    y = df[series.name].values
-    if len(X) < 2:
-        return pd.Series(dtype=float), None
+    y = df['Price'].values
     model = LinearRegression()
     model.fit(X, y)
     future_days = np.arange(df['days'].max()+1, df['days'].max()+days+1).reshape(-1,1)
@@ -158,12 +159,9 @@ def generate_recommendation(price_series, indicators, fundamentals, forecast_sig
     ema_30 = latest.get('EMA_30', ema_7)
     ema_200 = latest.get('EMA_200', ema_30)
     close = latest['Close']
-    # RSI
     rsi = latest.get('RSI', 50)
-    # MACD
     macd = latest.get('MACD', 0)
     signal = latest.get('Signal', 0)
-    # Fundamentals (simplified)
     pe = fundamentals.get('P/E', 20) if fundamentals else 20
     # Score
     score = 0
